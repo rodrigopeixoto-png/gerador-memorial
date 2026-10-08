@@ -9,40 +9,59 @@ from io import BytesIO
 
 # --- FUNÇÕES DE EXTRAÇÃO AVANÇADA ---
 
-def extrair_volume(elemento):
-    """Busca o volume nas BaseQuantities ou Psets de forma exaustiva."""
+def extrair_volume_e_material(elemento):
+    """Lê o padrão específico do AltoQi Eberick e mantém fallback para IFC genérico."""
+    volume = 0.0
+    material = "Concreto Especificado"
+    
     try:
-        # Busca nas propriedades e quantidades (Qto_BaseQuantities)
         psets = util.get_psets(elemento)
         for pset_nome, propriedades in psets.items():
             if isinstance(propriedades, dict):
                 for prop_nome, valor in propriedades.items():
                     nome_prop = str(prop_nome).lower()
-                    # Ignora propriedades de 'profile' (área da secção) e busca 'volume'
-                    if 'volume' in nome_prop:
+                    
+                    # 1. TENTA LER NO PADRÃO EBERICK (Ex: "Concreto - C-30 - Abatimento 5 cm")
+                    if 'concreto' in nome_prop and 'abatimento' in nome_prop:
+                        # Puxa o "C-30" dividindo o texto pelo hífen com espaços (" - ")
+                        partes = str(prop_nome).split(' - ')
+                        if len(partes) >= 2:
+                            material = partes[1].strip()
+                        
+                        # Extrai o valor do volume transformando vírgula em ponto
                         if isinstance(valor, (int, float)):
-                            return float(valor)
+                            volume = float(valor)
                         elif isinstance(valor, str):
                             numeros = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
                             if numeros:
-                                return float(numeros[0])
+                                volume = float(numeros[0])
+                        
+                        return volume, material
+
+                    # 2. FALLBACK PADRÃO IFC (Outros softwares)
+                    elif 'volume' in nome_prop:
+                        if isinstance(valor, (int, float)):
+                            volume = float(valor)
+                        elif isinstance(valor, str):
+                            numeros = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
+                            if numeros:
+                                volume = float(numeros[0])
+                                
+        # Se achou o volume pelo método genérico, busca o material na associação nativa do IFC
+        if volume > 0 and material == "Concreto Especificado":
+            if hasattr(elemento, 'HasAssociations') and elemento.HasAssociations:
+                for rel in elemento.HasAssociations:
+                    if rel.is_a('IfcRelAssociatesMaterial'):
+                        mat = rel.RelatingMaterial
+                        if mat.is_a('IfcMaterial'):
+                            material = mat.Name
+                        elif mat.is_a('IfcMaterialList') and len(mat.Materials) > 0:
+                            material = mat.Materials[0].Name
+                            
     except Exception:
         pass
-    return 0.0
 
-def extrair_material(elemento):
-    """Busca a associação de material padrão do elemento."""
-    if hasattr(elemento, 'HasAssociations') and elemento.HasAssociations:
-        for rel in elemento.HasAssociations:
-            if rel.is_a('IfcRelAssociatesMaterial'):
-                mat = rel.RelatingMaterial
-                if mat.is_a('IfcMaterial'):
-                    return mat.Name
-                elif mat.is_a('IfcMaterialList') and len(mat.Materials) > 0:
-                    return mat.Materials[0].Name
-                elif mat.is_a('IfcMaterialProfileSet'):
-                    return mat.MaterialProfiles[0].Material.Name
-    return "Betão Especificado"
+    return volume, material
 
 def extrair_dados_elementos(elementos):
     """Gera uma lista de dados para a tabela do Word a partir de uma lista de elementos."""
@@ -51,15 +70,16 @@ def extrair_dados_elementos(elementos):
     
     for el in elementos:
         nome = el.Name if el.Name else "N/A"
-        material = extrair_material(el)
-        volume = extrair_volume(el)
+        
+        # NOVA CHAMADA: Puxa volume e material ao mesmo tempo
+        volume, material = extrair_volume_e_material(el)
         volume_total += volume
         
         # Formata o volume, se for 0, coloca 0.00 para evidenciar que foi lido
         vol_str = f"{volume:.2f}" if volume > 0 else "0.00"
         dados.append([nome, material, vol_str])
         
-    # Ordena alfabeticamente pelo nome do elemento (Ex: P1, P2, P3)
+    # Ordena alfabeticamente pelo nome do elemento (Ex: P1, P2, P3...)
     dados.sort(key=lambda x: x[0])
     return dados, volume_total
 
