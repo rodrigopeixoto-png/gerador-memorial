@@ -1,0 +1,7 @@
+# Ignorar arquivos temporários e pastas de ambiente virtual
+__pycache__/
+.venv/
+venv/
+*.pyc
+*.ifc
+*.docx
