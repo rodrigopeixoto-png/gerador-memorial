@@ -1,5 +1,7 @@
 import os
+import re 
 import ifcopenshell
+# ... resto dos imports
 import ifcopenshell.util.element as util
 from docx import Document
 from docx.shared import Pt, Cm
@@ -9,13 +11,26 @@ from io import BytesIO
 # --- FUNÇÕES DE EXTRAÇÃO GENÉRICA DO IFC ---
 
 def extrair_volume(elemento):
-    """Busca qualquer propriedade que contenha 'Volume' de forma genérica."""
-    psets = util.get_psets(elemento)
-    for pset_nome, propriedades in psets.items():
-        if isinstance(propriedades, dict):
-            for prop_nome, valor in propriedades.items():
-                if 'volume' in prop_nome.lower() and isinstance(valor, (int, float)):
-                    return valor
+    """Busca propriedades de volume de forma agressiva, ignorando textos e unidades (Padrão Eberick)."""
+    try:
+        psets = util.get_psets(elemento)
+        for pset_nome, propriedades in psets.items():
+            if isinstance(propriedades, dict):
+                for prop_nome, valor in propriedades.items():
+                    # Procura qualquer propriedade que tenha 'volume' no nome
+                    if 'volume' in str(prop_nome).lower():
+                        # Se já for um número (Padrão TQS/Revit)
+                        if isinstance(valor, (int, float)):
+                            return float(valor)
+                        # Se for um texto como "1,25 m³" ou "1.25" (Padrão Eberick/AltoQi)
+                        elif isinstance(valor, str):
+                            # Troca vírgula por ponto e extrai apenas a parte numérica
+                            numeros = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
+                            if numeros:
+                                return float(numeros[0])
+    except Exception:
+        pass
+    
     return 0.0
 
 def extrair_material(elemento):
