@@ -1,36 +1,33 @@
 import os
-import re 
+import re
 import ifcopenshell
-# ... resto dos imports
 import ifcopenshell.util.element as util
 from docx import Document
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from io import BytesIO
 
-# --- FUNÇÕES DE EXTRAÇÃO GENÉRICA DO IFC ---
+# --- FUNÇÕES DE EXTRAÇÃO AVANÇADA ---
 
 def extrair_volume(elemento):
-    """Busca propriedades de volume de forma agressiva, ignorando textos e unidades (Padrão Eberick)."""
+    """Busca o volume nas BaseQuantities ou Psets de forma exaustiva."""
     try:
+        # Busca nas propriedades e quantidades (Qto_BaseQuantities)
         psets = util.get_psets(elemento)
         for pset_nome, propriedades in psets.items():
             if isinstance(propriedades, dict):
                 for prop_nome, valor in propriedades.items():
-                    # Procura qualquer propriedade que tenha 'volume' no nome
-                    if 'volume' in str(prop_nome).lower():
-                        # Se já for um número (Padrão TQS/Revit)
+                    nome_prop = str(prop_nome).lower()
+                    # Ignora propriedades de 'profile' (área da secção) e busca 'volume'
+                    if 'volume' in nome_prop:
                         if isinstance(valor, (int, float)):
                             return float(valor)
-                        # Se for um texto como "1,25 m³" ou "1.25" (Padrão Eberick/AltoQi)
                         elif isinstance(valor, str):
-                            # Troca vírgula por ponto e extrai apenas a parte numérica
                             numeros = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
                             if numeros:
                                 return float(numeros[0])
     except Exception:
         pass
-    
     return 0.0
 
 def extrair_material(elemento):
@@ -38,18 +35,17 @@ def extrair_material(elemento):
     if hasattr(elemento, 'HasAssociations') and elemento.HasAssociations:
         for rel in elemento.HasAssociations:
             if rel.is_a('IfcRelAssociatesMaterial'):
-                material = rel.RelatingMaterial
-                if material.is_a('IfcMaterial'):
-                    return material.Name
-                elif material.is_a('IfcMaterialList') and len(material.Materials) > 0:
-                    return material.Materials[0].Name
-                elif material.is_a('IfcMaterialProfileSet'):
-                    return material.MaterialProfiles[0].Material.Name
-    return "Concreto Especificado"
+                mat = rel.RelatingMaterial
+                if mat.is_a('IfcMaterial'):
+                    return mat.Name
+                elif mat.is_a('IfcMaterialList') and len(mat.Materials) > 0:
+                    return mat.Materials[0].Name
+                elif mat.is_a('IfcMaterialProfileSet'):
+                    return mat.MaterialProfiles[0].Material.Name
+    return "Betão Especificado"
 
-def extrair_dados_elementos(modelo, ifc_class):
-    """Gera uma lista de dados para a tabela do Word."""
-    elementos = modelo.by_type(ifc_class)
+def extrair_dados_elementos(elementos):
+    """Gera uma lista de dados para a tabela do Word a partir de uma lista de elementos."""
     dados = []
     volume_total = 0.0
     
@@ -59,11 +55,12 @@ def extrair_dados_elementos(modelo, ifc_class):
         volume = extrair_volume(el)
         volume_total += volume
         
-        # Formata o volume para 2 casas decimais, ou traço se for 0
-        vol_str = f"{volume:.2f}" if volume > 0 else "-"
-        
+        # Formata o volume, se for 0, coloca 0.00 para evidenciar que foi lido
+        vol_str = f"{volume:.2f}" if volume > 0 else "0.00"
         dados.append([nome, material, vol_str])
         
+    # Ordena alfabeticamente pelo nome do elemento (Ex: P1, P2, P3)
+    dados.sort(key=lambda x: x[0])
     return dados, volume_total
 
 # --- FUNÇÕES DE FORMATAÇÃO DO WORD ---
@@ -71,7 +68,7 @@ def extrair_dados_elementos(modelo, ifc_class):
 def adicionar_tabela_formatada(doc, cabecalhos, dados):
     """Cria uma tabela com bordas e cabeçalhos em negrito."""
     if not dados:
-        doc.add_paragraph("Nenhum elemento encontrado nesta categoria.", style='Italic')
+        doc.add_paragraph("Nenhum elemento encontrado neste pavimento.", style='Italic')
         return
         
     tabela = doc.add_table(rows=1, cols=len(cabecalhos))
@@ -96,17 +93,13 @@ def adicionar_tabela_formatada(doc, cabecalhos, dados):
 # --- MOTOR PRINCIPAL ---
 
 def gerar_memorial_docx(ifc_file_path):
-    # 1. Carrega o modelo IFC
     modelo = ifcopenshell.open(ifc_file_path)
-    
-    # 2. Inicia o Documento
     doc = Document()
     
     # --- CAPA ---
     p_capa = doc.add_paragraph()
     p_capa.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Adicionando a logomarca da UTEA se o arquivo existir no servidor
     caminho_logo = 'fundo_transparente.png'
     if os.path.exists(caminho_logo):
         p_capa.add_run().add_picture(caminho_logo, width=Cm(6.0))
@@ -125,56 +118,64 @@ def gerar_memorial_docx(ifc_file_path):
     p_capa.add_run(f'Modelo BIM: {nome_projeto}\nGerado Automaticamente via IFC')
     doc.add_page_break()
 
-    # --- TEXTOS FIXOS BÁSICOS ---
-    doc.add_heading('1. APRESENTAÇÃO', level=1)
-    doc.add_paragraph('Este documento apresenta o memorial descritivo dos elementos estruturais de concreto armado, contendo as identificações, materiais especificados e quantitativos geométricos extraídos diretamente do modelo BIM (arquivo IFC) gerado pelo software de cálculo estrutural.')
+    # --- AGRUPAMENTO POR PAVIMENTO ---
+    # Cria um dicionário para organizar os elementos por Piso (IfcBuildingStorey)
+    pavimentos = {}
+    classes_estruturais = ["IfcColumn", "IfcBeam", "IfcSlab", "IfcFooting"]
+    
+    for classe in classes_estruturais:
+        for el in modelo.by_type(classe):
+            # Tenta descobrir em que pavimento o elemento está
+            container = util.get_container(el)
+            nome_pav = container.Name if container else "Pavimento Indefinido"
+            
+            if nome_pav not in pavimentos:
+                pavimentos[nome_pav] = {"IfcColumn": [], "IfcBeam": [], "IfcSlab": [], "IfcFooting": []}
+            
+            pavimentos[nome_pav][classe].append(el)
 
-    doc.add_heading('2. NORMAS UTILIZADAS', level=1)
-    normas = [
-        'ABNT NBR 6118 - Projeto de estruturas de concreto - Procedimento;',
-        'ABNT NBR 6120 - Cargas para o cálculo de estruturas de edificações;',
-        'ABNT NBR 6123 - Forças devido ao vento em edificações;',
-        'ABNT NBR 8681 - Ações e segurança nas estruturas - Procedimento;'
-    ]
-    for norma in normas:
-        doc.add_paragraph(norma, style='List Bullet')
-
-    doc.add_heading('3. SOFTWARE UTILIZADO', level=1)
-    doc.add_paragraph('Para a análise estrutural, dimensionamento e detalhamento estrutural foi utilizado o sistema AltoQi Eberick e modelagem parametrizada via rotinas automatizadas na exportação em formato aberto (IFC).')
-
-    # --- EXTRAÇÃO DINÂMICA DE DADOS ---
+    # --- GERAÇÃO DAS SECÇÕES NO DOCUMENTO ---
     cabecalhos = ['Identificação', 'Material (Classe)', 'Volume Líquido (m³)']
     
-    # Pilares
-    doc.add_heading('4. PILARES', level=1)
-    dados_pilares, vol_pilares = extrair_dados_elementos(modelo, "IfcColumn")
-    adicionar_tabela_formatada(doc, cabecalhos, dados_pilares)
-    doc.add_paragraph(f'\nVolume total estimado em Pilares: {vol_pilares:.2f} m³').bold = True
+    # Mapeamento para títulos no Word
+    titulos_classes = {
+        "IfcColumn": "PILARES",
+        "IfcBeam": "VIGAS",
+        "IfcSlab": "LAJES",
+        "IfcFooting": "FUNDAÇÕES"
+    }
 
-    # Vigas
-    doc.add_heading('5. VIGAS', level=1)
-    dados_vigas, vol_vigas = extrair_dados_elementos(modelo, "IfcBeam")
-    adicionar_tabela_formatada(doc, cabecalhos, dados_vigas)
-    doc.add_paragraph(f'\nVolume total estimado em Vigas: {vol_vigas:.2f} m³').bold = True
+    vol_global = 0.0
 
-    # Lajes
-    doc.add_heading('6. LAJES', level=1)
-    dados_lajes, vol_lajes = extrair_dados_elementos(modelo, "IfcSlab")
-    adicionar_tabela_formatada(doc, cabecalhos, dados_lajes)
-    doc.add_paragraph(f'\nVolume total estimado em Lajes: {vol_lajes:.2f} m³').bold = True
+    # Iterar sobre as classes estruturais para criar os capítulos (ex: 4. PILARES)
+    contador_capitulo = 4
+    for classe in classes_estruturais:
+        doc.add_heading(f'{contador_capitulo}. {titulos_classes[classe]}', level=1)
+        
+        vol_total_classe = 0.0
+        
+        # Iterar sobre os pavimentos dentro de cada classe
+        for nome_pav, elementos_do_pavimento in pavimentos.items():
+            elementos = elementos_do_pavimento[classe]
+            if elementos:
+                # Título do Pavimento (ex: 4.1 Térreo)
+                doc.add_heading(f'Pavimento: {nome_pav}', level=2)
+                
+                dados, vol_parcial = extrair_dados_elementos(elementos)
+                adicionar_tabela_formatada(doc, cabecalhos, dados)
+                
+                vol_total_classe += vol_parcial
+                doc.add_paragraph() # Espaço
 
-    # Fundações (Sapatas, Blocos, Estacas)
-    doc.add_heading('7. FUNDAÇÕES', level=1)
-    dados_fund, vol_fund = extrair_dados_elementos(modelo, "IfcFooting")
-    adicionar_tabela_formatada(doc, cabecalhos, dados_fund)
-    doc.add_paragraph(f'\nVolume total estimado em Fundações: {vol_fund:.2f} m³').bold = True
-    
-    # Resumo Global
-    doc.add_heading('8. RESUMO DE MATERIAIS', level=1)
-    vol_global = vol_pilares + vol_vigas + vol_lajes + vol_fund
-    doc.add_paragraph(f'Volume global de concreto da estrutura: {vol_global:.2f} m³').bold = True
+        doc.add_paragraph(f'Volume total estimado em {titulos_classes[classe]}: {vol_total_classe:.2f} m³').bold = True
+        vol_global += vol_total_classe
+        contador_capitulo += 1
+        doc.add_page_break()
 
-    # 3. Salva em buffer para o Streamlit
+    # --- Resumo Global ---
+    doc.add_heading(f'{contador_capitulo}. RESUMO DE MATERIAIS', level=1)
+    doc.add_paragraph(f'Volume global de betão/concreto da estrutura: {vol_global:.2f} m³').bold = True
+
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
