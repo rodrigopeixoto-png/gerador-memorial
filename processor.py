@@ -1,7 +1,8 @@
+import os
 import ifcopenshell
 import ifcopenshell.util.element as util
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from io import BytesIO
 
@@ -19,7 +20,7 @@ def extrair_volume(elemento):
 
 def extrair_material(elemento):
     """Busca a associação de material padrão do elemento."""
-    if elemento.HasAssociations:
+    if hasattr(elemento, 'HasAssociations') and elemento.HasAssociations:
         for rel in elemento.HasAssociations:
             if rel.is_a('IfcRelAssociatesMaterial'):
                 material = rel.RelatingMaterial
@@ -29,7 +30,7 @@ def extrair_material(elemento):
                     return material.Materials[0].Name
                 elif material.is_a('IfcMaterialProfileSet'):
                     return material.MaterialProfiles[0].Material.Name
-    return "Concreto Específico do Projeto"
+    return "Concreto Especificado"
 
 def extrair_dados_elementos(modelo, ifc_class):
     """Gera uma lista de dados para a tabela do Word."""
@@ -89,11 +90,23 @@ def gerar_memorial_docx(ifc_file_path):
     # --- CAPA ---
     p_capa = doc.add_paragraph()
     p_capa.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p_capa.add_run('MEMORIAL DESCRITIVO DE ESTRUTURAS\n\n')
-    run.bold = True
-    run.font.size = Pt(20)
     
-    nome_projeto = modelo.by_type("IfcProject")[0].Name if modelo.by_type("IfcProject") else "Projeto Estrutural"
+    # Adicionando a logomarca da UTEA se o arquivo existir no servidor
+    caminho_logo = 'fundo_transparente.png'
+    if os.path.exists(caminho_logo):
+        p_capa.add_run().add_picture(caminho_logo, width=Cm(6.0))
+        p_capa.add_run('\n\n')
+        
+    run = p_capa.add_run('SECRETARIA DA SEGURANÇA PÚBLICA\nUnidade Técnica de Engenharia e Arquitetura - UTEA\n\n')
+    run.bold = True
+    run.font.size = Pt(14)
+    
+    run2 = p_capa.add_run('MEMORIAL DESCRITIVO DE ESTRUTURAS\n\n')
+    run2.bold = True
+    run2.font.size = Pt(20)
+    
+    projetos = modelo.by_type("IfcProject")
+    nome_projeto = projetos[0].Name if projetos else "Projeto Estrutural"
     p_capa.add_run(f'Modelo BIM: {nome_projeto}\nGerado Automaticamente via IFC')
     doc.add_page_break()
 
@@ -104,40 +117,45 @@ def gerar_memorial_docx(ifc_file_path):
     doc.add_heading('2. NORMAS UTILIZADAS', level=1)
     normas = [
         'ABNT NBR 6118 - Projeto de estruturas de concreto - Procedimento;',
-        'ABNT NBR 6120 - Cargas para o cálculo de estruturas de edificações;'
+        'ABNT NBR 6120 - Cargas para o cálculo de estruturas de edificações;',
+        'ABNT NBR 6123 - Forças devido ao vento em edificações;',
+        'ABNT NBR 8681 - Ações e segurança nas estruturas - Procedimento;'
     ]
     for norma in normas:
         doc.add_paragraph(norma, style='List Bullet')
+
+    doc.add_heading('3. SOFTWARE UTILIZADO', level=1)
+    doc.add_paragraph('Para a análise estrutural, dimensionamento e detalhamento estrutural foi utilizado o sistema AltoQi Eberick e modelagem parametrizada via rotinas automatizadas na exportação em formato aberto (IFC).')
 
     # --- EXTRAÇÃO DINÂMICA DE DADOS ---
     cabecalhos = ['Identificação', 'Material (Classe)', 'Volume Líquido (m³)']
     
     # Pilares
-    doc.add_heading('3. PILARES', level=1)
+    doc.add_heading('4. PILARES', level=1)
     dados_pilares, vol_pilares = extrair_dados_elementos(modelo, "IfcColumn")
     adicionar_tabela_formatada(doc, cabecalhos, dados_pilares)
-    doc.add_paragraph(f'\nVolume total de concreto em Pilares: {vol_pilares:.2f} m³').bold = True
+    doc.add_paragraph(f'\nVolume total estimado em Pilares: {vol_pilares:.2f} m³').bold = True
 
     # Vigas
-    doc.add_heading('4. VIGAS', level=1)
+    doc.add_heading('5. VIGAS', level=1)
     dados_vigas, vol_vigas = extrair_dados_elementos(modelo, "IfcBeam")
     adicionar_tabela_formatada(doc, cabecalhos, dados_vigas)
-    doc.add_paragraph(f'\nVolume total de concreto em Vigas: {vol_vigas:.2f} m³').bold = True
+    doc.add_paragraph(f'\nVolume total estimado em Vigas: {vol_vigas:.2f} m³').bold = True
 
     # Lajes
-    doc.add_heading('5. LAJES', level=1)
+    doc.add_heading('6. LAJES', level=1)
     dados_lajes, vol_lajes = extrair_dados_elementos(modelo, "IfcSlab")
     adicionar_tabela_formatada(doc, cabecalhos, dados_lajes)
-    doc.add_paragraph(f'\nVolume total de concreto em Lajes: {vol_lajes:.2f} m³').bold = True
+    doc.add_paragraph(f'\nVolume total estimado em Lajes: {vol_lajes:.2f} m³').bold = True
 
-    # Fundações
-    doc.add_heading('6. FUNDAÇÕES', level=1)
+    # Fundações (Sapatas, Blocos, Estacas)
+    doc.add_heading('7. FUNDAÇÕES', level=1)
     dados_fund, vol_fund = extrair_dados_elementos(modelo, "IfcFooting")
     adicionar_tabela_formatada(doc, cabecalhos, dados_fund)
-    doc.add_paragraph(f'\nVolume total de concreto em Fundações: {vol_fund:.2f} m³').bold = True
+    doc.add_paragraph(f'\nVolume total estimado em Fundações: {vol_fund:.2f} m³').bold = True
     
     # Resumo Global
-    doc.add_heading('7. RESUMO DE MATERIAIS', level=1)
+    doc.add_heading('8. RESUMO DE MATERIAIS', level=1)
     vol_global = vol_pilares + vol_vigas + vol_lajes + vol_fund
     doc.add_paragraph(f'Volume global de concreto da estrutura: {vol_global:.2f} m³').bold = True
 
