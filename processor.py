@@ -7,12 +7,13 @@ from docx.shared import Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from io import BytesIO
 
-# --- FUNÇÕES DE EXTRAÇÃO AVANÇADA ---
+# --- FUNÇÃO DE EXTRAÇÃO AVANÇADA (EBERICK + GENÉRICO) ---
 
-def extrair_volume_e_material(elemento):
-    """Lê o padrão específico do AltoQi Eberick e mantém fallback para IFC genérico."""
+def extrair_dados_eberick(elemento):
+    """Lê o padrão específico do AltoQi Eberick e extrai Volume, Material e Armadura."""
     volume = 0.0
     material = "Concreto Especificado"
+    armadura = "-"
     
     try:
         psets = util.get_psets(elemento)
@@ -20,73 +21,77 @@ def extrair_volume_e_material(elemento):
             if isinstance(propriedades, dict):
                 for prop_nome, valor in propriedades.items():
                     nome_prop = str(prop_nome).lower()
+                    valor_str = str(valor)
                     
-                    # 1. TENTA LER NO PADRÃO EBERICK (Ex: "Concreto - C-30 - Abatimento 5 cm")
+                    # 1. BUSCA DE MATERIAL
+                    # Padrão 1: Nome da propriedade contém o material (ex: Pilares/Vigas)
                     if 'concreto' in nome_prop and 'abatimento' in nome_prop:
-                        # Puxa o "C-30" dividindo o texto pelo hífen com espaços (" - ")
                         partes = str(prop_nome).split(' - ')
                         if len(partes) >= 2:
                             material = partes[1].strip()
-                        
-                        # Extrai o valor do volume transformando vírgula em ponto
+                        # Extrai o volume desta mesma linha
                         if isinstance(valor, (int, float)):
                             volume = float(valor)
                         elif isinstance(valor, str):
-                            numeros = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
-                            if numeros:
-                                volume = float(numeros[0])
-                        
-                        return volume, material
-
-                    # 2. FALLBACK PADRÃO IFC (Outros softwares)
-                    elif 'volume' in nome_prop:
-                        if isinstance(valor, (int, float)):
-                            volume = float(valor)
-                        elif isinstance(valor, str):
-                            numeros = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
-                            if numeros:
-                                volume = float(numeros[0])
-                                
-        # Se achou o volume pelo método genérico, busca o material na associação nativa do IFC
-        if volume > 0 and material == "Concreto Especificado":
-            if hasattr(elemento, 'HasAssociations') and elemento.HasAssociations:
-                for rel in elemento.HasAssociations:
-                    if rel.is_a('IfcRelAssociatesMaterial'):
-                        mat = rel.RelatingMaterial
-                        if mat.is_a('IfcMaterial'):
-                            material = mat.Name
-                        elif mat.is_a('IfcMaterialList') and len(mat.Materials) > 0:
-                            material = mat.Materials[0].Name
+                            nums = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
+                            if nums: volume = float(nums[0])
                             
+                    # Padrão 2: Lajes e Fundações ("Classe de concreto")
+                    elif 'classe de concreto' in nome_prop:
+                        material = valor_str
+
+                    # 2. BUSCA DE VOLUME (Se não achou no Padrão 1)
+                    elif 'volume' in nome_prop and volume == 0.0:
+                        if isinstance(valor, (int, float)):
+                            volume = float(valor)
+                        elif isinstance(valor, str):
+                            nums = re.findall(r"[-+]?\d*\.\d+|\d+", valor.replace(',', '.'))
+                            if nums: volume = float(nums[0])
+
+                    # 3. BUSCA DE ARMADURA / TAXA DE ARMADURA
+                    if 'taxa de armadura' in nome_prop:
+                        armadura = valor_str
+                        if '%' not in armadura: 
+                            armadura += ' %'
+                    elif 'armadura' in nome_prop and 'aço' in nome_prop and armadura == "-":
+                        # Lê valores em kg (ex: "Armadura - Aço CA50...")
+                        nums = re.findall(r"[-+]?\d*\.\d+|\d+", valor_str.replace(',', '.'))
+                        if nums:
+                            armadura = f"{float(nums[0]):.2f} kg"
+
+        # Fallback de Material (Padrão IFC)
+        if material == "Concreto Especificado" and hasattr(elemento, 'HasAssociations') and elemento.HasAssociations:
+            for rel in elemento.HasAssociations:
+                if rel.is_a('IfcRelAssociatesMaterial'):
+                    mat = rel.RelatingMaterial
+                    if mat.is_a('IfcMaterial'): material = mat.Name
+                    elif mat.is_a('IfcMaterialList') and len(mat.Materials) > 0: material = mat.Materials[0].Name
+
     except Exception:
         pass
 
-    return volume, material
+    return volume, material, armadura
 
 def extrair_dados_elementos(elementos):
-    """Gera uma lista de dados para a tabela do Word a partir de uma lista de elementos."""
+    """Gera a lista formatada para a tabela do Word."""
     dados = []
     volume_total = 0.0
     
     for el in elementos:
         nome = el.Name if el.Name else "N/A"
-        
-        # NOVA CHAMADA: Puxa volume e material ao mesmo tempo
-        volume, material = extrair_volume_e_material(el)
+        volume, material, armadura = extrair_dados_eberick(el)
         volume_total += volume
         
-        # Formata o volume, se for 0, coloca 0.00 para evidenciar que foi lido
         vol_str = f"{volume:.2f}" if volume > 0 else "0.00"
-        dados.append([nome, material, vol_str])
+        dados.append([nome, material, armadura, vol_str])
         
-    # Ordena alfabeticamente pelo nome do elemento (Ex: P1, P2, P3...)
+    # Ordena alfabeticamente (Ex: L205, L206, P1, P2...)
     dados.sort(key=lambda x: x[0])
     return dados, volume_total
 
 # --- FUNÇÕES DE FORMATAÇÃO DO WORD ---
 
 def adicionar_tabela_formatada(doc, cabecalhos, dados):
-    """Cria uma tabela com bordas e cabeçalhos em negrito."""
     if not dados:
         doc.add_paragraph("Nenhum elemento encontrado neste pavimento.", style='Italic')
         return
@@ -139,53 +144,37 @@ def gerar_memorial_docx(ifc_file_path):
     doc.add_page_break()
 
     # --- AGRUPAMENTO POR PAVIMENTO ---
-    # Cria um dicionário para organizar os elementos por Piso (IfcBuildingStorey)
     pavimentos = {}
     classes_estruturais = ["IfcColumn", "IfcBeam", "IfcSlab", "IfcFooting"]
     
     for classe in classes_estruturais:
         for el in modelo.by_type(classe):
-            # Tenta descobrir em que pavimento o elemento está
             container = util.get_container(el)
             nome_pav = container.Name if container else "Pavimento Indefinido"
             
             if nome_pav not in pavimentos:
                 pavimentos[nome_pav] = {"IfcColumn": [], "IfcBeam": [], "IfcSlab": [], "IfcFooting": []}
-            
             pavimentos[nome_pav][classe].append(el)
 
     # --- GERAÇÃO DAS SECÇÕES NO DOCUMENTO ---
-    cabecalhos = ['Identificação', 'Material (Classe)', 'Volume Líquido (m³)']
-    
-    # Mapeamento para títulos no Word
-    titulos_classes = {
-        "IfcColumn": "PILARES",
-        "IfcBeam": "VIGAS",
-        "IfcSlab": "LAJES",
-        "IfcFooting": "FUNDAÇÕES"
-    }
+    cabecalhos = ['Identificação', 'Material', 'Armadura (Taxa/Peso)', 'Volume (m³)']
+    titulos_classes = {"IfcColumn": "PILARES", "IfcBeam": "VIGAS", "IfcSlab": "LAJES", "IfcFooting": "FUNDAÇÕES"}
 
     vol_global = 0.0
-
-    # Iterar sobre as classes estruturais para criar os capítulos (ex: 4. PILARES)
     contador_capitulo = 4
+
     for classe in classes_estruturais:
         doc.add_heading(f'{contador_capitulo}. {titulos_classes[classe]}', level=1)
-        
         vol_total_classe = 0.0
         
-        # Iterar sobre os pavimentos dentro de cada classe
         for nome_pav, elementos_do_pavimento in pavimentos.items():
             elementos = elementos_do_pavimento[classe]
             if elementos:
-                # Título do Pavimento (ex: 4.1 Térreo)
                 doc.add_heading(f'Pavimento: {nome_pav}', level=2)
-                
                 dados, vol_parcial = extrair_dados_elementos(elementos)
                 adicionar_tabela_formatada(doc, cabecalhos, dados)
-                
                 vol_total_classe += vol_parcial
-                doc.add_paragraph() # Espaço
+                doc.add_paragraph()
 
         doc.add_paragraph(f'Volume total estimado em {titulos_classes[classe]}: {vol_total_classe:.2f} m³').bold = True
         vol_global += vol_total_classe
